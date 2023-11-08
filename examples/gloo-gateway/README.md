@@ -1,302 +1,284 @@
 # Using Gloo Gateway with Argo Rollouts
 
-[Gloo Gateway](https://docs.solo.io/gloo-gateway/v2/) is a cloud-native Layer 7 proxy that is based on the [Kubernetes Gateway API](https://gateway-api.sigs.k8s.io/).
+[Gloo Gateway](https://docs.solo.io/gloo-gateway/v2/) is a powerful Kubernetes-native ingress controller and API gateway that is based on the [Kubernetes Gateway API](https://gateway-api.sigs.k8s.io/). It excels in function-level routing, supports legacy apps, microservices and serverless, offers robust discovery capabilities, integrates seamlessly with open-source projects, and is designed to support hybrid applications with various technologies, architectures, protocols, and clouds. 
+
 ## Prerequisites
 
 * Kubernetes cluster with minimum version 1.23
 
-### Install K8s Gateway API CRDs
-```shell
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.0.0/standard-install.yaml
-```
+## Step 1: Install the Kubernetes Gateway API and Gloo Gateway
 
-### Install Gloo Gateway
+1. Install the Kubernetes Gateway API CRDs. 
+   ```shell
+   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.0.0/standard-install.yaml
+   ```
 
-```shell
-helm install default -n gloo-system --create-namespace \
-    oci://ghcr.io/solo-io/helm-charts/gloo-gateway \
-    --version 2.0.0-beta1 \
-    --wait --timeout 1m
-```
+2. Install Gloo Gateway. 
+   ```shell
+   helm install default -n gloo-system --create-namespace \
+       oci://ghcr.io/solo-io/helm-charts/gloo-gateway \
+       --version 2.0.0-beta1 \
+       --wait --timeout 1m
+   ```
 
-The following `GatewayClass` resource is automatically created as part of the helm installion:
+3. Verify that the Gloo Gateway control plane is up and running.
+   ```shell
+   kubectl get pods -n gloo-system
+   ```
 
-```yaml
-apiVersion: gateway.networking.k8s.io/v1beta1
-kind: GatewayClass
-metadata:
-  name: gloo-gateway
-spec:
-  controllerName: solo.io/gloo-gateway
-```
+4. Verify that the default `GatewayClass` resource is created.
+   ```shell
+   kubectl wait --timeout=1m -n gloo-system gatewayclass/gloo-gateway --for=condition=Accepted
+   ```
 
-The presence of this `GatewayClass` enables us to define `Gateways` which will then dynamically provision proxies to handle incoming traffic.
+   During the Helm installation, a `GatewayClass` resource is automatically created for you with the following configuration
+   ```yaml
+   apiVersion: gateway.networking.k8s.io/v1beta1
+   kind: GatewayClass
+   metadata:
+     name: gloo-gateway
+   spec:
+     controllerName: solo.io/gloo-gateway
+   ```
 
-Let's confirm that the `GatewayClass` resource is created correctly:
-
-```shell
-kubectl wait --timeout=1m -n gloo-system gatewayclass/gloo-gateway --for=condition=Accepted
-```
-
-### Install Argo Rollouts
-
-```shell
-kubectl create namespace argo-rollouts
-kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
-```
-See the [installation docs](https://argo-rollouts.readthedocs.io/en/stable/installation) for more detail.
-
-### Install Argo Rollout Gateway API Plugin
-
-```shell
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: argo-rollouts-config # must be so name
-  namespace: argo-rollouts # must be in this namespace
-data:
-  trafficRouterPlugins: |-
-    - name: "argoproj-labs/gatewayAPI"
-      location: "https://github.com/argoproj-labs/rollouts-plugin-trafficrouter-gatewayapi/releases/download/v0.0.0-rc1/gateway-api-plugin-linux-amd64"
-EOF
-```
-
-See the [project README](/README.md#installing-the-plugin) for more info.
-
-You may need to restart the Argo Rollouts pod for the plugin to take effect
-```shell
-kubectl rollout restart deployment -n argo-rollouts argo-rollouts
-```
+   You can use this `GatewayClass` to define `Gateway` resources that dynamically provision and configure Envoy proxies to handle incoming traffic.
 
 
-## Step 1 - Create Gateway object
+## Step 2: Set up Argo Rollouts
 
-Now we will actually configure Gloo Gateway and Argo Rollouts to manage the progressive deployment of a test application. All of the following resources are located in the `examples/gloo-gateway` directory.
+1. Install Argo Rollouts. 
+   ```shell
+   kubectl create namespace argo-rollouts
+   kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+   ```
 
-```shell
-cd examples/gloo-gateway
-```
+   See the [installation docs](https://argo-rollouts.readthedocs.io/en/stable/installation) for more detail.
 
-Create a gateway:
+2. Change the Argo Rollouts config map to install the Argo Rollout Gateway API Plugin. For more information, see the [project README](/README.md#installing-the-plugin).
+   ```yaml
+   cat <<EOF | kubectl apply -f -
+   apiVersion: v1
+   kind: ConfigMap
+   metadata:
+     name: argo-rollouts-config # must be so name
+     namespace: argo-rollouts # must be in this namespace
+   data:
+     trafficRouterPlugins: |-
+       - name: "argoproj-labs/gatewayAPI"
+         location: "https://github.com/argoproj-labs/rollouts-plugin-trafficrouter-gatewayapi/releases/download/v0.0.0-rc1/gateway-api-plugin-linux-amd64"
+   EOF
+   ```
 
-```yaml
-apiVersion: gateway.networking.k8s.io/v1beta1
-kind: Gateway
-metadata:
-  name: gloo
-  namespace: default
-spec:
-  gatewayClassName: gloo-gateway
-  listeners:
-    - name: http
-      protocol: HTTP
-      port: 80
-```
+3. Restart the Argo Rollouts pod for the plug-in to take effect. 
+   ```shell
+   kubectl rollout restart deployment -n argo-rollouts argo-rollouts
+   ```
 
-Apply the file:
+4. Create a cluster role to allow the Argo Rollouts pod to manage HTTPRoute resources. 
+   __Note:__ This `ClusterRole` is overly permissive and is provided __only for demo purposes__.
 
-```shell
-kubectl apply -f gateway.yaml
-```
+   ```yaml
+   kubectl apply -f- <<EOF
+   apiVersion: rbac.authorization.k8s.io/v1
+   kind: ClusterRole
+   metadata:
+     name: gateway-controller-role
+     namespace: argo-rollouts
+   rules:
+     - apiGroups:
+         - "*"
+       resources:
+         - "*"
+       verbs:
+         - "*"
+   EOF
+   ```
 
-## Step 2 - Configure RBAC to allow Argo Rollouts to control HTTPRoute resources
-
-Create a `ClusterRole` resource with permissions to manage `HTTPRoute` resources:
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: gateway-controller-role
-  namespace: argo-rollouts
-rules:
-  - apiGroups:
-      - "*"
-    resources:
-      - "*"
-    verbs:
-      - "*"
-```
-
-__Note:__ This `ClusterRole` is overly permissive and is provided __only for demo purposes__.
-
-Now we will create a binding to give the Argo Rollouts `ServiceAccount` these permissions:
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: gateway-admin
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: gateway-controller-role
-subjects:
-  - namespace: argo-rollouts
-    kind: ServiceAccount
-    name: argo-rollouts
-```
-
-Apply the file:
-
-```shell
-kubectl apply -f rbac.yaml
-```
-
-## Step 4 - Create HTTPRoute to route to a stable and canary service
-Create HTTPRoute associated with the `Gateway` to be managed by Argo Rollouts:
-
-```yaml
-kind: HTTPRoute
-apiVersion: gateway.networking.k8s.io/v1beta1
-metadata:
-  name: argo-rollouts-http-route
-  namespace: default
-spec:
-  parentRefs:
-    - name: gloo
-  hostnames:
-  - "demo.example.com"
-  rules:
-  - matches:
-    - path:
-        type: PathPrefix
-        value: /  
-    backendRefs:
-    - name: argo-rollouts-stable-service
-      kind: Service
-      port: 80
-    - name: argo-rollouts-canary-service
-      kind: Service
-      port: 80
-```
-
-Create the stable service:
-
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: argo-rollouts-stable-service
-  namespace: default
-spec:
-  ports:
-    - port: 80
-      targetPort: http
-      protocol: TCP
-      name: http
-  selector:
-    app: rollouts-demo
-```
-
-Create the canary service:
-
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: argo-rollouts-canary-service
-  namespace: default
-spec:
-  ports:
-    - port: 80
-      targetPort: http
-      protocol: TCP
-      name: http
-  selector:
-    app: rollouts-demo
-```
-
-Apply the files:
-
-```shell
-kubectl apply -f httproute.yaml
-kubectl apply -f stable.yaml
-kubectl apply -f canary.yaml
-```
+5. Create a cluster role binding to give the Argo Rollouts service account the permissions from the cluster role. 
+   ```yaml
+   kubectl apply -f- <<EOF
+   apiVersion: rbac.authorization.k8s.io/v1
+   kind: ClusterRoleBinding
+   metadata:
+     name: gateway-admin
+   roleRef:
+     apiGroup: rbac.authorization.k8s.io
+     kind: ClusterRole
+     name: gateway-controller-role
+   subjects:
+     - namespace: argo-rollouts
+       kind: ServiceAccount
+       name: argo-rollouts
+   EOF
+   ```
 
 
-## Step 5 - Create an example Rollout
+## Step 3: Configure a rollout for a sample app
 
-Deploy a rollout to get the initial version.
+1. Create a stable and canary service for the `rollouts-demo` pod that you deploy in the next step.  
+   ```yaml
+   kubectl apply -f- <<EOF
+   apiVersion: v1
+   kind: Service
+   metadata:
+     name: argo-rollouts-stable-service
+     namespace: default
+   spec:
+     ports:
+       - port: 80
+         targetPort: http
+         protocol: TCP
+         name: http
+     selector:
+       app: rollouts-demo
+   ---
+   apiVersion: v1
+   kind: Service
+   metadata:
+     name: argo-rollouts-canary-service
+     namespace: default
+   spec:
+     ports:
+       - port: 80
+         targetPort: http
+         protocol: TCP
+         name: http
+     selector:
+       app: rollouts-demo
+   EOF
+   ```
 
-```yaml title="rollout.yaml"
-apiVersion: argoproj.io/v1alpha1
-kind: Rollout
-metadata:
-  name: rollouts-demo
-  namespace: default
-spec:
-  replicas: 3
-  strategy:
-    canary:
-      canaryService: argo-rollouts-canary-service # our created canary service
-      stableService: argo-rollouts-stable-service # our created stable service
-      trafficRouting:
-        plugins:
-          argoproj-labs/gatewayAPI:
-            httpRoute: argo-rollouts-http-route # our created httproute
-            namespace: default
-      steps:
-      - setWeight: 30
-      - pause: { duration: 30s }
-      - setWeight: 60
-      - pause: { duration: 30s }
-      - setWeight: 100
-      - pause: { duration: 30s }
-  revisionHistoryLimit: 2
-  selector:
-    matchLabels:
-      app: rollouts-demo
-  template:
-    metadata:
-      labels:
-        app: rollouts-demo
-    spec:
-      containers:
-        - name: rollouts-demo
-          image: kostiscodefresh/summer-of-k8s-app:v1
-          ports:
-            - name: http
-              containerPort: 8080
-              protocol: TCP
-          resources:
-            requests:
-              memory: 32Mi
-              cpu: 5m
-```
+2. Create an Argo Rollout that deploys the `rollouts-demo` pod. Add your stable and canary services to the `spec.strategy.canary` section. 
+   ```yaml
+   kubectl apply -f- <<EOF
+   apiVersion: argoproj.io/v1alpha1
+   kind: Rollout
+   metadata:
+     name: rollouts-demo
+     namespace: default
+   spec:
+     replicas: 3
+     strategy:
+       canary:
+         canaryService: argo-rollouts-canary-service # our created canary service
+         stableService: argo-rollouts-stable-service # our created stable service
+         trafficRouting:
+           plugins:
+             argoproj-labs/gatewayAPI:
+               httpRoute: argo-rollouts-http-route # our created httproute
+               namespace: default
+         steps:
+         - setWeight: 30
+         - pause: { duration: 30s }
+         - setWeight: 60
+         - pause: { duration: 30s }
+         - setWeight: 100
+         - pause: { duration: 30s }
+     revisionHistoryLimit: 2
+     selector:
+       matchLabels:
+         app: rollouts-demo
+     template:
+       metadata:
+         labels:
+           app: rollouts-demo
+       spec:
+         containers:
+           - name: rollouts-demo
+             image: kostiscodefresh/summer-of-k8s-app:v1
+             ports:
+               - name: http
+                 containerPort: 8080
+                 protocol: TCP
+             resources:
+               requests:
+                 memory: 32Mi
+                 cpu: 5m
+   EOF
+   ```
 
-Apply the file:
+3. Create an HTTP Gateway that that is managed by Argo Rollouts. 
+   ```yaml
+   kubectl apply -f- <<EOF
+   apiVersion: gateway.networking.k8s.io/v1beta1
+   kind: Gateway
+   metadata:
+     name: gloo
+     namespace: default
+   spec:
+     gatewayClassName: gloo-gateway
+     listeners:
+       - name: http
+         protocol: HTTP
+         port: 80
+   EOF
+   ```
 
-```shell
-kubectl apply -f rollout.yaml
-```
+4. Create an HTTPRoute that is associated with the `Gateway` managed by Argo Rollouts and that can route to the stable and canary services that you set up earlier. 
+   ```yaml
+   kubectl apply -f- <<EOF
+   kind: HTTPRoute
+   apiVersion: gateway.networking.k8s.io/v1beta1
+   metadata:
+     name: argo-rollouts-http-route
+     namespace: default
+   spec:
+     parentRefs:
+       - name: gloo
+     hostnames:
+     - "demo.example.com"
+     rules:
+     - matches:
+       - path:
+           type: PathPrefix
+           value: /  
+       backendRefs:
+       - name: argo-rollouts-stable-service
+         kind: Service
+         port: 80
+       - name: argo-rollouts-canary-service
+         kind: Service
+         port: 80
+   EOF
+   ```
 
-Check the rollout by using `curl` to make a request: 
-```shell
-export GATEWAY_IP=$(kubectl get gateway gloo -o=jsonpath="{.status.addresses[0].value}")
-curl -H "host: demo.example.com" $GATEWAY_IP/callme
-```
+## Step 4: Test a sample rollout
 
-This command got the IP of the proxy directly from the `Status` field of the `Gateway` resource. Alternatively, you can port-forward to the pod.
+1. Get the IP address of the gateway. 
+   ```shell
+   export GATEWAY_IP=$(kubectl get gateway gloo -o=jsonpath="{.status.addresses[0].value}")
+   echo $GATEWAY_IP
+   ```
 
-The output should be:
+   If you try out this guide in a test setup, such as kind, you must port-forward the gateway pod instead. 
 
-```shell
-<div class='pod' style='background:#44B3C2'> ver: 1.0
- </div>%
-```
+2. Send a request to the `rollouts-demo` app.
+   ```
+   curl -H "host: demo.example.com" $GATEWAY_IP/callme
+   ```
 
-Change the manifest to the `v2` tag and while the rollout is progressing you should see
-the split traffic by visiting the IP of the gateway (see step 2)
+   Example output: 
+   ```shell
+   <div class='pod' style='background:#44B3C2'> ver: 1.0
+    </div>%
+   ```
 
-```shell
-kubectl patch rollout rollouts-demo -n default \
-  --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/image", "value":"kostiscodefresh/summer-of-k8s-app:v2"}]'
-```
+3. Change the manifest to use the `v2` tag to start a rollout of your app. Argo Rollouts automatically starts splitting traffic between version 1 and version 2 of the app for the duration of the rollout.
+   ```shell
+   kubectl patch rollout rollouts-demo -n default \
+     --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/image", "value":"kostiscodefresh/summer-of-k8s-app:v2"}]'
+   ```
 
-Run the command and depending on the canary status you will sometimes see "v1" returned and sometimes "v2"
-```shell
-while true; do curl -H "host: demo.example.com" $GATEWAY_IP/callme; done
-```
+4. Send a few more requests to your app. Because traffic is split between version 1 and version 2 of the app, you see responses from both app versions until the rollout is completed.
+   ```shell
+   while true; do curl -H "host: demo.example.com" $GATEWAY_IP/callme; done
+   ```
+
+   Example output:
+   ```
+   <div class='pod' style='background:#F1A94E'> ver: 2.0
+   </div><div class='pod' style='background:#F1A94E'> ver: 2.0
+   </div><div class='pod' style='background:#44B3C2'> ver: 1.0
+   </div><div class='pod' style='background:#44B3C2'> ver: 1.0
+   </div><div class='pod' style='background:#F1A94E'> ver: 2.0
+   ```
